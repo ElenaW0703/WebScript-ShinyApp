@@ -1,0 +1,303 @@
+---
+title: "Sta 523 - Midterm Project 2 - Fall 2021"
+output: rmarkdown::html_document
+runtime: shiny
+---
+Due Friday, December 3rd by 5:00 pm
+
+<br/>
+
+### Rules
+
+Review all of the rules detailed in `README.md`, if you have any questions please direct them to myself or the TAs.
+
+<br/>
+
+```{r}
+library(tidyverse)
+library(tibble)
+```
+
+
+### Task 1 - Figuring out the NY Times Article Search API
+
+```
+https://api.nytimes.com/svc/search/v2/articlesearch.json?fq=(print_page:1 AND print_section:\"A\" AND document_type:\"article\")&page=0&begin_date=20180713&end_date=20180713&api-key=HrTU9A9hBqzEoCZNoSfE9utPnq4grOC5
+```
+
+* `begin_date=`20180713
+
+* `end_date=`20180713
+
+* `facet=`
+
+* `facet_fields=`
+
+* `facet_filter=`
+
+* `fl=`
+
+* `fq=`fq=(print_page:1 AND print_section:\"A\" AND document_type:\"article\")
+
+* `page=`0,default(the first page)
+
+* `q=`
+
+* `sort=` 
+
+<br/>    
+
+### Task 2 - Getting data from the NY Times Article Search API
+
+The main purpose of this task is to request the API address and get the 
+corresponding dataframe. Firstly, the function verifies the input date, and then
+ensure the parameters in the API address to read the Json file and get the data 
+frame. Here since each request retrieves just 1 page of data, we should determine 
+the total page number we need from "hits" elements in the list. If there is no 
+result in the specified date, it would show a empty dataframe with column names. 
+Note that since the API key will be limited ar most 10 requests/minute, the sleep 
+time should be set as 6 seconds. 
+
+```{r}
+get_nyt_articles = function(year, month, day, api_key) {
+  # check the length of input
+  if(length(year) != 1)
+    stop("Year should be length 1!")
+  if(length(month) != 1)
+    stop("Month should be length 1!")
+  if(length(day) != 1)
+    stop("Day should be length 1!")
+  if(length(api_key) != 1)
+    stop("Api key should be length 1!")
+  # check the type of integer
+  if (is.numeric(year)==TRUE & is.numeric(month)==TRUE & is.numeric(day)==TRUE & is.character(api_key)==TRUE){
+    # check the input date (roughly assume the date is to 2022)
+    if (year>999 & year<=2022 & day>0 & day<32){
+    # check if the date is valid
+    checkdate = tryCatch(lubridate::is.Date(as.Date(paste(year, month, day, sep = '-'))), 
+             error = function(e) return(FALSE)) 
+      if (checkdate == TRUE){
+        # convert date format
+        old_date = paste(month,day,year,sep = "/")
+        new_date = as.character(as.Date(old_date,"%m/%d/%Y"),"%Y%m%d")
+      } else{return("the date should be valid")}
+    } else{return("the date should be valid")}
+  } else{return("the type of input should be valid")}
+  
+  # combine url parameters
+  nyt_url = paste0("https://api.nytimes.com/svc/search/v2/articlesearch.json?",
+           "fq=(print_page:1 AND print_section:\"A\" AND document_type:\"article\")",
+           "&begin_date=",new_date,"&end_date=",new_date,"&page=0&api-key=",api_key)
+  # read json file 
+  nytimes = jsonlite::read_json(nyt_url) 
+  # get the total number of page
+  hits = nytimes$response$meta$hits
+  page_total = hits/10
+  if (schoolmath::is.decimal(page_total) == TRUE){
+  page_total = as.integer(page_total)+1
+  }else{page_total = as.integer(page_total)}
+  
+  # get tidy data frame from current API
+  nyt_all = tibble()
+  page = 0
+  if(hits>0){
+    repeat{
+      nytimes = nytimes$response$docs %>%
+        tibble(data = .) %>%
+        hoist(
+          data,
+          "headline",
+          "byline",
+          "web_url",
+          "lead_paragraph",
+          "source"
+        )%>% 
+        select(!any_of("data"))
+      # combine all current page
+      nyt_all = rbind(nyt_all,nytimes)
+      
+      # stop if it processing the last page
+      if(page == page_total-1)
+        break
+
+      page = page + 1
+      Sys.sleep(6)
+      
+      # get new page
+      nyt_url = paste0("https://api.nytimes.com/svc/search/v2/articlesearch.json?",
+           "fq=(print_page:1 AND print_section:\"A\" AND document_type:\"article\")",
+           "&begin_date=",new_date,"&end_date=",new_date,"&page=",
+           page,"&api-key=",api_key)
+      nytimes = jsonlite::read_json(nyt_url) 
+    }
+  }else{
+    # if no result, then empty dataset
+    nyt_all = tibble(
+      headline = list(head = list(main = '')),
+      byline = list(byline = list(original = '')),
+      web_url = '',
+      lead_paragraph = '',
+      source= '')  
+    }
+ return(nyt_all)
+}
+```
+
+
+
+<br/>
+
+### Task 3 - Shiny Front End
+
+This app asks user to input the date and their api key to retrieve the articles 
+they want from the newyork times website. The headlines would show up in the main 
+panel when they hit the retrieval button. After they click the headline, 
+a window would show up containing the information of the selected article 
+including the byline, the first leading paragraph, as well as the url link 
+to the article for further reading. The code is implemented based on 
+the structure provided, and it is separated into two modules UI and Server. 
+The retrieved result is purely based on the response from the get_nyt_articles 
+from task 2. 
+Note if there is no information in a certain date, shiny app would output a message. 
+
+```{r}
+library(shiny)
+library(purrr)
+library(shinyWidgets)
+```
+
+```{r}
+# this function takes data retrieved from api and extract the title and byline information from it. 
+extractline = function(data){
+  titles = c()
+  bylines= c()
+  if (length(data$headline[[1]])>1){
+  for ( i in 1:nrow(data)){
+    title = data$headline[[i]]$main
+    byline = data$byline[[i]]$original
+    titles= c(titles, title)
+    bylines = c(bylines, byline)
+  }
+  info = list("title"= titles,
+              "byline" = bylines)}
+  else{info = list('title' = 'Nothing is here',
+                   'byline' = 'Too bad lol')}
+  return(info)
+}
+
+
+```
+
+```{r, ui}
+# the UI module is used to set up the background, main panel and sidebars 
+UI = fluidPage(
+    setBackgroundImage(
+    src = "https://img4.goodfon.com/wallpaper/nbig/c/da/the-new-york-times-niu-iork-taims-ssha-new-york-amerikanskai.jpg"
+  ),
+    titlePanel(h3("NYTimes API",
+                  style = "color: white")),
+    sidebarLayout(
+      sidebarPanel(
+        # input for links #, n ,
+        br(),
+        # input for dates, Date
+        dateInput("Date",
+                  "Date to look at",
+                  value = "2018-07-13",
+                  format = "yyyy-mm-dd",
+                  startview = "month",
+                  weekstart = 0, 
+                  language = "en"),
+        br(),
+        textInput("Key",
+                  "Your API key", 
+                  value = "HrTU9A9hBqzEoCZNoSfE9utPnq4grOC5"),
+        
+        br(),
+        actionButton("Retrieve","Retrieve !!!")
+      ),
+      mainPanel(
+        uiOutput("Headlines")
+        )
+    )
+  )
+
+```
+
+```{r, server}
+# This server module is responsible for reacting to any clicks and information a user put into the side bar 
+# and return corresponding information in the mainpanel and modal box 
+
+SERVER = function(input, output, session) {
+    state = reactiveValues(
+      observers = list()
+    )
+    # observe retrieve 
+    observeEvent(input$Retrieve, {
+      # Destroy existing observers
+      for(i in seq_along(state$observers)) {
+        state$observers[[i]]$destroy()
+      }
+      # retrieve the necessary information 
+      key = input$Key
+      date = as.character(input$Date)
+      date_list = strsplit(date, "-")
+      year = date_list[[1]][1]
+      year = as.integer(year)
+      month = date_list[[1]][2]
+      month = as.integer(month)
+      day = date_list[[1]][3]
+      day = as.integer(day)
+      data = get_nyt_articles(year, month, day, key)
+      n = nrow(data)
+      information = extractline(data)
+      headline = information[["title"]]
+      byline = information[["byline"]]
+      links = data$web_url
+      leadparagraph = data$lead_paragraph
+      # Destroy existing observers
+      for(i in seq_along(state$observers)) {
+        state$observers[[i]]$destroy()
+      }
+        
+      ui_elems = map(
+        seq_len(n), 
+        function(i) 
+          fluidRow(actionLink(paste0("Headlines",i), 
+                              h4(headline[i]),
+                              style="color: white"))
+      )
+      
+      output$Headlines = renderUI(fluidPage(ui_elems))
+      # Reset and create new observers for each of our links
+      state$observers = map(
+        seq_len(n), 
+        function(i) {
+          label = paste0("Headlines",i)
+          observeEvent(input[[label]], ignoreInit = TRUE, {
+               showModal(modalDialog(title = headline[i],
+                 byline[i],
+                 h5("First Paragraph:"),
+                 leadparagraph[i],
+                 h5("Link:"),
+                 # for linking to the webpage
+                 a(href = links[i],links[i]),
+                 size = "l"
+                 )
+                 )
+          })
+        }
+      )
+    })
+  }
+
+```
+
+
+```{r}
+shinyApp(
+  ui = UI,
+  server = SERVER
+)
+```
+
